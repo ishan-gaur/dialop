@@ -1,24 +1,28 @@
 import json
-import openai
 import os
 import pathlib
 from rich.prompt import IntPrompt, Prompt
 from rich.markup import escape
+from openai import OpenAI
 
 from envs import DialogueEnv
 from utils import num_tokens
 
+api_key = None
 try:
     with open(pathlib.Path(__file__).parent / ".api_key") as f:
         x = json.load(f)
-        openai.organization = x["organization"]
-        openai.api_key = x["api_key"]
+        # only need the api_key now
+        # openai.organization = x["organization"]
+        api_key = x["api_key"]
     print("Loaded .api_key")
 except:
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY")
 
-if not openai.api_key:
+if not api_key:
     print("Warning: no OpenAI API key loaded.")
+
+client = OpenAI(api_key=api_key)
 
 class OutOfContextError(Exception):
     pass
@@ -53,63 +57,81 @@ class LLMPlayer:
         self.prompt = prompt
         self.role = role
         self.console = console
-        self.model = "text-davinci-003"
         self.optional = optional
         self.removed_optional = False
-        if self.role in ["user", "agent", "user0", "user1"]:
-            stop_tokens = ["User", "Agent", "You", "\n"]
-        elif self.role in ["player-1", "player-2"]:
-            stop_tokens = ["Partner", "You", "\n"]
-        else:
-            raise NotImplementedError
+        self.model = "gpt-5-2025-08-07"
         self.model_kwargs = dict(
             model=self.model,
-            temperature=0.1,
-            top_p=.95,
-            frequency_penalty=0,
-            presence_penalty=0,
-            stop=stop_tokens,
+            reasoning={"effort": "low"},
         )
         if model_kwargs is not None:
             self.model_kwargs.update(**model_kwargs)
-        self.prefix = prefix
-    #    self.model = "gpt-3.5-turbo"
+        self.messages = [
+            {
+                "role": "developer",
+                "content": prompt
+            },
+            {
+                "role": "user",
+                "content": ""
+            }
+        ]
 
     def observe(self, obs):
-        self.prompt += obs
+        # skip the first observation so we don't have to add an explicit "developer" player
+        # if obs[self.role] == self.messages[0]["content"]:
+        #     return
+        # if "[message]" not in obs[self.role]:
+        #     self.messages[0]["content"] += "\n" + obs[self.role]
+        # else:
+        #     players = set(obs.keys()) - set("done") - set("turn_player")
+        #     self.messages.append(
+        #         {
+        #             "role": str((players - obs["turn_player"])[0]), # observation came from the last player
+        #             "content": obs[self.role]
+        #         }
+        #     )
+        if "Partner" not in obs and self.messages[1]["content"] != '': # if it's the first message, it's just the observation without a role
+            obs = "You: " + obs
+        self.messages[1]["content"] += obs.strip() + "\n"
 
     def respond(self):
         self.console.rule(f"{self.role}'s turn")
-        if not self.prompt.endswith(self.prefix):
-            self.prompt += self.prefix
-        #self.console.print(escape(self.prompt))
-        remaining = 4096 - num_tokens(self.prompt)
-        if remaining < 0 and self.optional:
-            self._remove_optional_context()
-            remaining = 4096 - num_tokens(self.prompt)
+        # remaining = 4096 - num_tokens(self.prompt)
+        # if remaining < 0 and self.optional:
+        #     self._remove_optional_context()
+        #     remaining = 4096 - num_tokens(self.prompt)
         # Still out of context after removing
-        if remaining < 0:
-            print("OUT OF CONTEXT! Remaining ", remaining)
-            raise OutOfContextError()
+        # if remaining < 0:
+        #     print("OUT OF CONTEXT! Remaining ", remaining)
+        #     raise OutOfContextError()
+        # kwargs = dict(
+        #     prompt=self.prompt,
+        #     max_tokens=min(remaining, 128),
+        # )
         kwargs = dict(
-            prompt=self.prompt,
-            max_tokens=min(remaining, 128),
+            # max_tokens=128,
+            input=self.messages
         )
         kwargs.update(**self.model_kwargs)
-        response = openai.Completion.create(**kwargs)
-        self.console.print("Response: ",
-                           escape(response["choices"][0]["text"].strip()))
-        self.console.print("stop: ", response["choices"][0]["finish_reason"])
-        if response["choices"][0]["finish_reason"] == "length":
-            if not self.optional:
-                raise OutOfContextError()
-            self._remove_optional_context()
-            response = openai.Completion.create(**kwargs)
-            self.console.print("Response: ",
-                               escape(response["choices"][0]["text"].strip()))
-            self.console.print("stop: ", response["choices"][0]["finish_reason"])
-        self.console.print(response["usage"])
-        return response["choices"][0]["text"].strip()
+        response = client.responses.create(**kwargs)
+        assert response.output[0].type == "reasoning"
+        assert response.output[1].type == "message"
+        assert len(response.output[1].content) == 1
+        message = response.output[1].content[0].text.strip()
+        self.console.print("Response: ", escape(message))
+        if response.output[0].content:
+            self.console.print("Reasoning: ", escape(response.output[0].content[0].text.strip()))
+        # if response["choices"][0]["finish_reason"] == "length":
+        #     if not self.optional:
+        #         raise OutOfContextError()
+        #     self._remove_optional_context()
+        #     response = openai.Completion.create(**kwargs)
+        #     self.console.print("Response: ",
+        #                        escape(response["choices"][0]["text"].strip()))
+        #     self.console.print("stop: ", response["choices"][0]["finish_reason"])
+        # self.console.print(response["usage"])
+        return message
 
     def _remove_optional_context(self):
         print("Cutting out optional context from prompt.")

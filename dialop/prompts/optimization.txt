@@ -1,9 +1,10 @@
-You and your partner are area chairs for a conference and you have to assign reviewers to papers. Each of you has some information about which reviewers would be good for which papers, but you'll have to communicate in order to make the best assignments.
+You and your partner are area chairs for a conference and you have to assign reviewers to papers. Each of you has partial information about which reviewers would be good for which papers, but you'll have to communicate in order to make the best assignments.
 
 For each game, you will see a table of reviewer-paper similarity scores. The higher the score, the better the fit. You will also see a list of reviewers and papers. You can send messages to your partner, propose assignments, and accept or reject your partner's proposals.
 
 Your goal is to propose a one-to-one matching between reviewers and papers with the highest sum of scores. The "Final Score" at the end of the chat is out of 1.0 and shows how well you did relative to the best you could do with your partner. Your goal is to maximize that score.
 
+In each of the examples below, you will see the table you would've observed and then an example conversation from your perspective.
 
 EXAMPLE 1.
 Reviewer Paper Similarity Scores:
@@ -69,4 +70,4 @@ Partner: [propose] Proposal:<br/>&emsp; - BLEU: Sofia Patel<br/>&emsp; - Electra
 You: [accept]
 Final Score: 1
 
-EXAMPLE 3.
+The user will give you the partial transcript of the observation and conversation. You must output the next action: message, propose, or reject, along with the associated input to the action.
