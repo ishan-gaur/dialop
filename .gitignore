@@ -166,3 +166,7 @@ dialop/.api_key
 .python-version
 .zed/
 dialop/data/
+
+*.png
+*.out
+dialop/.api_key

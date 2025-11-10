@@ -6,7 +6,8 @@ import time
 from typing import Optional, Literal
 from itertools import cycle
 
-from openai.error import APIConnectionError, RateLimitError
+# from openai.error import APIConnectionError, RateLimitError
+from openai import APIConnectionError, RateLimitError
 import numpy as np
 import tyro
 from ruamel.yaml import YAML
@@ -15,8 +16,10 @@ from rich.console import Console
 console = Console()
 
 from envs import (
-    ItineraryEnv,
-    MatchingEnv,
+    # ItineraryEnv,
+    PlanningEnv,
+    OptimizationEnv,
+    # MatchingEnv,
     MediationEnv,
     WordLimit,
     ForceProposal,
@@ -31,13 +34,15 @@ from players import (
 from utils import Logger, retry, count_words
 
 FPATH = pathlib.Path(os.path.dirname(os.path.realpath(__file__)))
-RESDIR = pathlib.Path("/Users/user/coop/collaborative-dialogue/results/")
+# RESDIR = pathlib.Path("/Users/user/coop/collaborative-dialogue/results/")
+RESDIR = FPATH / "results"
 #RESDIR = pathlib.Path("/Users/user/Projects/collaborative-dialogue/results/")
-DATADIR = pathlib.Path("/Users/user/coop-dialog-data/data/")
+# DATADIR = pathlib.Path("/Users/user/coop-dialog-data/data/")
+DATADIR = FPATH / "data"
 
 GAME_CLSS = {
-    "matching": MatchingEnv,
-    "itinerary": ItineraryEnv,
+    "matching": OptimizationEnv,
+    "itinerary": PlanningEnv,
     "mediation": MediationEnv,
 }
 
@@ -57,7 +62,7 @@ def selfplay(
         data = deepcopy(game)
         # Clear action log so env doesn't initialize with a message history
         data["action_log"] = []
-        if game_cls == MatchingEnv:
+        if game_cls == OptimizationEnv:
             score = data["proposal_reward"]
             score_norm = data["result"]["norm"]
         else:
@@ -82,24 +87,24 @@ def prompted_selfplay(
     end,
 ):
     for game_idx, game in enumerate(games[resume:end]):
-        if game_cls == MatchingEnv:
+        if game_cls == OptimizationEnv:
             data = deepcopy(game)
             original_log = game["action_log"]
-        elif game_cls == ItineraryEnv:
+        elif game_cls == PlanningEnv:
             data = deepcopy(game)
             original_log = game["action_log"]
         elif game_cls == MediationEnv:
             data = deepcopy(game)
             original_log = game["action_log"]
 
-        if game_cls == ItineraryEnv:
+        if game_cls == PlanningEnv:
             try:
                 score = data["action_log"][-3]["scores"]["total"]
             except:
                 for turn in range(0, len(data["action_log"])):
                     if data["action_log"][turn]["type"] == "proposal":
                         score = data["action_log"][turn]["scores"]["total"]
-        elif game_cls == MatchingEnv:
+        elif game_cls == OptimizationEnv:
             score = data["proposal_reward"]
         elif game_cls == MediationEnv:
             score = data["result"]["score"]
@@ -174,7 +179,7 @@ def run(
             f"{pname} params",
             json.dumps(getattr(player, 'model_kwargs', {}), indent=2))
         log.write(f"{pname} prompt", player.prompt)
-    if game_cls == ItineraryEnv:
+    if game_cls == PlanningEnv:
         if env.query_executor == "gpt3":
             log.write(f"Query Executor Prompt", env.search.prompt)
         else:
@@ -289,12 +294,12 @@ def main(
 
     game_cls = GAME_CLSS[game]
     EXP_DIR = RESDIR / game
-    if game_cls == MatchingEnv:
-        DATA_PATH = DATADIR / "reviewer.jsonl.post"
-    elif game_cls == ItineraryEnv:
-        DATA_PATH = DATADIR / "itinerary.jsonl.post"
+    if game_cls == OptimizationEnv:
+        DATA_PATH = DATADIR / "optimization.jsonl"
+    elif game_cls == PlanningEnv:
+        DATA_PATH = DATADIR / "itinerary.jsonl"
     elif game_cls == MediationEnv:
-        DATA_PATH = DATADIR / "mediation.jsonl.post"
+        DATA_PATH = DATADIR / "mediation.jsonl"
 
     os.makedirs(EXP_DIR / exp_name, exist_ok=True)
     with open(DATA_PATH) as f:
@@ -313,19 +318,19 @@ def main(
     def create_players():
         print("Initializing players...")
         # Create prompts.
-        if game_cls == MatchingEnv:
-            with open(FPATH / "prompts" / "matching_prompt.txt") as f:
+        if game_cls == OptimizationEnv:
+            with open(FPATH / "prompts" / "optimization.txt") as f:
                 matching_prompt = f.read()
-        elif game_cls == ItineraryEnv:
+        elif game_cls == PlanningEnv:
             # if use_word_limit:
             #     with open(FPATH / "prompts" / "itinerary_agent_timed.txt") as f:
             #         agent_prompt = f.read()
             #     with open(FPATH / "prompts" / "itinerary_user_timed.txt") as f:
             #         user_prompt = f.read()
             # else:
-            with open(FPATH / "prompts" / "itinerary_agent.txt") as f:
+            with open(FPATH / "prompts" / "planning_agent.txt") as f:
                 agent_prompt = f.read()
-            with open(FPATH / "prompts" / "itinerary_user.txt") as f:
+            with open(FPATH / "prompts" / "planning_user.txt") as f:
                 user_prompt = f.read()
         elif game_cls == MediationEnv:
             with open(FPATH / "prompts" / "mediation_agent.txt") as f:
@@ -335,7 +340,7 @@ def main(
             with open(FPATH / "prompts" / "mediation_user1.txt") as f:
                 user1_prompt = f.read()
 
-        if game_cls == MatchingEnv:
+        if game_cls == OptimizationEnv:
             p1, p2 = "player-1", "player-2"
             p1_prompt, p2_prompt = matching_prompt, matching_prompt
             optional1 = p1_prompt[
@@ -344,7 +349,7 @@ def main(
             optional2 = p2_prompt[
                 p2_prompt.index("EXAMPLE 2"):]
             optional2 = optional2[:optional2.index("EXAMPLE 2")]
-        elif game_cls == ItineraryEnv:
+        elif game_cls == PlanningEnv:
             p1, p2 = "agent", "user"
             p1_prompt, p2_prompt = agent_prompt, user_prompt
             optional1, optional2 = None, None
@@ -367,22 +372,18 @@ def main(
                                       optional=optional,
                                       model_kwargs={"temperature": temperature})}
         else:
-            players = {p1: LLMPlayer(p1_prompt, p1, console,
-                                     optional=optional1,
-                                     model_kwargs={"temperature": temperature}),
-                       p2:  LLMPlayer(p2_prompt, p2, console,
-                                      optional=optional2,
-                                      model_kwargs={"temperature": temperature})}
+            players = {p1: LLMPlayer(p1_prompt, p1, console,optional=optional1),
+                       p2:  LLMPlayer(p2_prompt, p2, console, optional=optional2)}
         return players
 
     def create_env():
         print("Initializing envs...")
-        if game_cls == MatchingEnv:
-            env = MatchingEnv()
+        if game_cls == OptimizationEnv:
+            env = OptimizationEnv()
             if use_word_limit:
                 env = ForceProposal(env, ["player-1", "player-2"])
-        elif game_cls == ItineraryEnv:
-            env = ItineraryEnv(query_executor="gpt3")
+        elif game_cls == PlanningEnv:
+            env = PlanningEnv(query_executor="gpt3")
             if use_word_limit:
                 env = AsymmetricForceProposal(env, ["agent"])
         elif game_cls == MediationEnv:
@@ -423,6 +424,8 @@ def main(
         elapsed = (time.time() - start) / 60
         times.append(elapsed)
         print(f" == Finished {i} {elapsed:.1f} == ")
+        if i > 50:
+            break
 
     exit()
 

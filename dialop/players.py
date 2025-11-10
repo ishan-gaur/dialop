@@ -62,14 +62,14 @@ class LLMPlayer:
         self.model = "gpt-5-2025-08-07"
         self.model_kwargs = dict(
             model=self.model,
-            reasoning={"effort": "low"},
+            reasoning={"effort": "high"},
         )
         if model_kwargs is not None:
-            self.model_kwargs.update(**model_kwargs)
+            raise ValueError("model_kwargs is not supported")
         self.messages = [
             {
                 "role": "developer",
-                "content": prompt
+                "content": prompt + ("" if optional is None else optional)
             },
             {
                 "role": "user",
