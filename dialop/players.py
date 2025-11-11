@@ -5,8 +5,8 @@ from rich.prompt import IntPrompt, Prompt
 from rich.markup import escape
 from openai import OpenAI
 
-from envs import DialogueEnv
-from utils import num_tokens
+from dialop.envs import DialogueEnv
+from dialop.utils import num_tokens
 
 api_key = None
 try:
@@ -78,6 +78,8 @@ class LLMPlayer:
         ]
 
     def observe(self, obs):
+        # Just dump all observations into the user message
+        # the actual prompt will be the system/developer message
         # skip the first observation so we don't have to add an explicit "developer" player
         # if obs[self.role] == self.messages[0]["content"]:
         #     return

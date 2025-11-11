@@ -1,214 +1,126 @@
-"""Utilities for turning logged dialogue games into training examples."""
-
-from __future__ import annotations
-
 import json
-import re
-from dataclasses import dataclass
-from html import unescape
+import time
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional
+from rich.console import Console
+from rich import print
+from dialop.envs import OptimizationEnv
+from dialop.players import LLMPlayer
+from dialop.constants import get_data, GameType
 
-from dialop.constants import GameType, get_data
+def load_prompt(game, player):
+	"""Load prompt for a specific game and player role."""
+	fname = f"{game}.txt"  # optimization uses same prompt for both players
+	return (Path(__file__).parent.parent / f"prompts/{fname}").read_text()
 
+def response_from_log(action_log_entry):
+	# action types: message, proposal, proposal_response
+	if action_log_entry["type"] == "message":
+		return f" [message] {action_log_entry['message']['data']}"
+	elif action_log_entry["type"] == "proposal":
+		return f" [propose] {action_log_entry['proposal']}"
+	elif action_log_entry["type"] == "proposal_response":
+		if action_log_entry['response']['accept']:
+			return " [accept]"
+		else:
+			return " [reject]"
 
-_OPT_INSTRUCTIONS = (
-	Path(__file__).resolve().parent.parent / "envs" / "data" / "optimization.txt"
-).read_text().strip()
+def run_selfplay_game(action_log, max_turns=30):
+	"""Run a single self-play game between two LLM players."""   
+	dataset_observations = []
+	console = Console()
 
-_TASKS_SHORT = [
-	"BLEU",
-	"Electra",
-	"GloVe",
-	"GLUE",
-	"LLaMA",
-	"RoBERTa",
-	"QuAC",
-	"SWAG",
-]
+	# Create environment
+	env = OptimizationEnv()
 
-_WORKERS = [
-	"Ava Li",
-	"Daniel Nguyen",
-	"Sofia Patel",
-	"Andrei Petrov",
-	"Morgan Reed",
-	"Joseph Santos",
-	"Ethan Smith",
-	"Noah Wilson",
-]
+	# Load prompts and create two LLM players
+	prompt_text = load_prompt("optimization", "player")
+	players = {
+		"player-1": LLMPlayer(prompt_text, "player-1", console),
+		"player-2": LLMPlayer(prompt_text, "player-2", console)
+	}
 
+	print("[bold green]Starting optimization self-play game...[/bold green]")
 
-@dataclass(frozen=True)
-class RenderedTurn:
-	"""Lightweight representation of a single conversational turn."""
+	# Reset environment and get initial observations
+	obs = env.reset()
 
-	player: int
-	content: str
-	turn_type: str
+	# Give each player their initial observation
+	for player_name, player in players.items():
+		if player_name in obs:
+			player.observe(obs[player_name])
 
+	# Initialize action log for game data
+	start_time = time.time()
 
-def _normalize_whitespace(text: str) -> str:
-	"""Collapse repeated whitespace while preserving slash-separated tokens."""
+	# Main game loop
+	for turn in range(len(action_log)):
+		if obs.get("done", False):
+			print(f"[bold blue]Game completed in {turn} turns![/bold blue]")
+			break
 
-	# Replace HTML breaks with spaces if they slipped into messages.
-	text = text.replace("<br/>", " ").replace("<br>", " ")
-	text = re.sub(r"\s+", " ", text)
-	return text.strip()
+		current_player = obs["turn_player"]
+		player = players[current_player]
 
+		print(f"\n[yellow]Turn {turn + 1}: {current_player}'s turn[/yellow]")
 
-def _render_proposal(raw_html: str) -> str:
-	"""Turn stored HTML proposals into readable plain text."""
+		try:
+			# Get player's response
+			response = response_from_log(action_log[turn])
+			print(response)
+			# add current player's observation
+			player_messages = deepcopy(players[current_player].messages)
+			player_messages.append(
+				{
+					"role": "assistant",
+					"content": response
+				}
+			)
+			player_messages[0]['role'] = 'system'  # ensure first message is system
+			dataset_observations.append(player_messages)
 
-	text = unescape(raw_html)
-	text = text.replace("<br/>", "\n").replace("<br>", "\n")
-	text = text.replace("&emsp;", " ")
-	lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-	lines = [line for line in lines if line]
-	return "\n".join(lines)
-
-
-def _render_action(action: Dict) -> Optional[RenderedTurn]:
-	"""Map an action log entry to a uniform textual representation."""
-
-	kind = action.get("type")
-	if kind == "message":
-		message = action["message"]["data"]
-		return RenderedTurn(
-			player=action["player"],
-			content=f"[message] {_normalize_whitespace(message)}",
-			turn_type=kind,
-		)
-	if kind == "proposal":
-		proposal = _render_proposal(action["proposal"])
-		return RenderedTurn(
-			player=action["player"],
-			content=f"[propose] {proposal}",
-			turn_type=kind,
-		)
-	if kind == "proposal_response":
-		token = "[accept]" if action["response"]["accept"] else "[reject]"
-		return RenderedTurn(
-			player=action["player"],
-			content=token,
-			turn_type=kind,
-		)
-	return None
+			# Step the environment
+			obs, resample = env.step(response)
 
 
-def iter_matching_transcripts(records: Iterable[Dict]) -> Iterator[List[RenderedTurn]]:
-	"""Yield cleaned message streams for optimization (matching) games."""
+			if resample:
+				print("[red]Error occurred, need to resample[/red]")
+				continue
 
-	for record in records:
-		transcript: List[RenderedTurn] = []
-		for action in record.get("action_log", []):
-			rendered = _render_action(action)
-			if rendered is not None:
-				transcript.append(rendered)
-		if transcript:
-			yield transcript
+			# Update all players with new observations
+			for player_name, player_obj in players.items():
+				if player_name in obs and obs[player_name]:
+					player_obj.observe(obs[player_name])
 
+		except Exception as e:
+			print(f"[red]Error during turn {turn + 1}: {e}[/red]")
+			# Need to see how/when this happens, not sure how we want to handle this yet
+			assert False, f"Error during turn {turn + 1}: {e}"
 
-def _format_table(table: List[List]) -> str:
-	"""Format a table (with headers) into a simple ASCII view."""
+	# assertion for now, it is possible some of them didn't finish, but I need
+	# to check how to verify that from the log
+	if not obs.get("done", False):
+		# seems like for some they just finished early
+		if len(action_log) < max_turns:
+			pass
+		else:
+			assert False, "Game did not complete successfully"
+	return dataset_observations
 
-	rows: List[str] = []
-	for row in table:
-		formatted_cells = []
-		for cell in row:
-			if cell == "":
-				formatted_cells.append("-")
-			else:
-				formatted_cells.append(str(cell))
-		rows.append(" | ".join(formatted_cells))
-	return "\n".join(rows)
-
-
-def _player_table(record: Dict, player: int) -> List[List[str]]:
-	"""Reconstruct the per-player view of the similarity table."""
-
-	table = record["table"]
-	mask = record["mask1"] if player == 0 else record["mask2"]
-	scale = record["scale1"] if player == 0 else record["scale2"]
-	num_rows = len(table)
-	num_cols = len(table[0]) if table else 0
-	header = ["", *_TASKS_SHORT[:num_cols]]
-	rows: List[List[str]] = [header]
-	for i in range(num_rows):
-		worker = _WORKERS[i] if i < len(_WORKERS) else f"Reviewer {i}"
-		row: List[str] = [worker]
-		for j in range(num_cols):
-			if mask[i][j]:
-				value = int(table[i][j] * scale)
-				row.append(str(value))
-			else:
-				row.append("-")
-		rows.append(row)
-	return rows
-
-
-def build_system_prompt(record: Dict, player: int) -> str:
-	"""Combine instructions with the player's private table."""
-
-	table_str = _format_table(_player_table(record, player))
-	return (
-		f"{_OPT_INSTRUCTIONS}\n\n"
-		f"You are speaking as player {player}.\n"
-		f"Here is your similarity table (unknown cells shown as '-'):\n"
-		f"{table_str}\n"
-		f"The best attainable total reward with full information is {record.get('best_assignment_reward', 'unknown')}.")
-
-
-def iter_matching_turn_examples(
-	records: Iterable[Dict],
-	*,
-	include_players: Iterable[int] = (0, 1),
-) -> Iterator[Dict]:
-	"""Yield supervised examples for each turn a target player speaks."""
-
-	include_players = tuple(include_players)
-	for convo_idx, record in enumerate(records):
-		transcript: List[RenderedTurn] = []
-		for action in record.get("action_log", []):
-			rendered = _render_action(action)
-			if rendered is not None:
-				transcript.append(rendered)
-		if not transcript:
-			continue
-		system_prompts = {
-			player: build_system_prompt(record, player) for player in include_players
-		}
-		for player in include_players:
-			history: List[Dict[str, str]] = []
-			system_message = {"role": "system", "content": system_prompts[player]}
-			for turn_idx, turn in enumerate(transcript):
-				role = "assistant" if turn.player == player else "user"
-				if turn.player == player:
-					prompt_messages = [system_message, *history]
-					yield {
-						"id": f"matching-{convo_idx}-p{player}-t{turn_idx}",
-						"conversation_id": convo_idx,
-						"turn_index": turn_idx,
-						"player": player,
-						"messages": prompt_messages,
-						"response": turn.content,
-						"turn_type": turn.turn_type,
-					}
-				history.append({"role": role, "content": turn.content})
-
-
-def load_matching_data() -> List[Dict]:
-	"""Helper to load all human-human optimization games."""
-
-	return get_data(human_user=True, human_assistant=True, game_type=GameType.MATCHING)
-
-
-def export_matching_turns(records: Iterable[Dict], output_path: Path) -> int:
-	"""Write per-turn training examples to JSON Lines."""
-
-	count = 0
-	with output_path.open("w", encoding="utf-8") as f:
-		for example in iter_matching_turn_examples(records):
-			f.write(json.dumps(example) + "\n")
-			count += 1
-	return count
+def get_matching_human_human_sft_data(num_games=None):
+	"""Load human-human matching data for SFT fine-tuning."""
+	data = get_data(human_user=True, human_assistant=True, game_type=GameType.MATCHING)
+	print(f"Loaded {len(data)} human-human matching games.")
+	dataset = []
+	if num_games is not None:
+		data = data[:num_games]
+	for i in range(len(data)):
+		print(f"\n\n=== Running self-play for game {i+1}/{len(data)} ===")
+		conversation_observations = run_selfplay_game(data[i]['action_log'])
+		dataset.extend(conversation_observations)
+	# tokenize (placeholder to set breakpoint below)
+	print(len(dataset))
+	  
+if __name__ == "__main__":
+	get_matching_human_human_sft_data(10)

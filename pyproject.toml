@@ -17,6 +17,10 @@ dependencies = [
     "tyro",
     "thefuzz",
     "openai",
+    "fire>=0.7.1",
+    "flask>=2.2.2",
+    "ruamel-yaml>=0.17.21",
+    "torch>=2.8.0",
 ]
 
 [project.optional-dependencies]
