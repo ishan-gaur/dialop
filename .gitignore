@@ -170,3 +170,5 @@ dialop/data/
 *.png
 *.out
 dialop/.api_key
+data/
+*.jsonl
