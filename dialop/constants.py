@@ -23,7 +23,7 @@ def get_data(human_user: bool, human_assistant: bool, game_type: GameType):
         with open(data_file, "r") as f:
             for line in f:
                 data.append(json.loads(line))
-        return data
+        return data, f"{game_type.value}_human-human"
     elif human_user and not human_assistant:
         player_type_folder = DATA_FOLDER / "human-lm"
         raise NotImplementedError("Human user with LM assistant setting not recorded yet")

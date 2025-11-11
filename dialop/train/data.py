@@ -3,8 +3,12 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List
+
+from datasets import Dataset
 from rich.console import Console
 from rich import print
+
 from dialop.envs import OptimizationEnv
 from dialop.players import LLMPlayer
 from dialop.constants import get_data, GameType
@@ -26,9 +30,9 @@ def response_from_log(action_log_entry):
 		else:
 			return " [reject]"
 
-def run_selfplay_game(action_log, max_turns=30):
-	"""Run a single self-play game between two LLM players."""   
-	dataset_observations = []
+def run_selfplay_game(action_log, game_index, max_turns=30):
+	"""Run a single self-play game between two LLM players."""
+	dataset_observations: List[Dict] = []
 	console = Console()
 
 	# Create environment
@@ -71,14 +75,18 @@ def run_selfplay_game(action_log, max_turns=30):
 			print(response)
 			# add current player's observation
 			player_messages = deepcopy(players[current_player].messages)
-			player_messages.append(
-				{
-					"role": "assistant",
-					"content": response
-				}
-			)
-			player_messages[0]['role'] = 'system'  # ensure first message is system
-			dataset_observations.append(player_messages)
+			player_messages.append({
+				"role": "assistant",
+				"content": response,
+			})
+			player_messages[0]["role"] = "system"
+			dataset_observations.append({
+				"messages": player_messages,
+				"player": current_player,
+				"turn_index": turn,
+				"action_type": action_log[turn]["type"],
+				"game_index": game_index,
+			})
 
 			# Step the environment
 			obs, resample = env.step(response)
@@ -110,17 +118,32 @@ def run_selfplay_game(action_log, max_turns=30):
 
 def get_matching_human_human_sft_data(num_games=None):
 	"""Load human-human matching data for SFT fine-tuning."""
-	data = get_data(human_user=True, human_assistant=True, game_type=GameType.MATCHING)
+	data, game_desc = get_data(human_user=True, human_assistant=True, game_type=GameType.MATCHING)
 	print(f"Loaded {len(data)} human-human matching games.")
-	dataset = []
+	dataset_examples: List[Dict] = []
 	if num_games is not None:
 		data = data[:num_games]
 	for i in range(len(data)):
 		print(f"\n\n=== Running self-play for game {i+1}/{len(data)} ===")
-		conversation_observations = run_selfplay_game(data[i]['action_log'])
-		dataset.extend(conversation_observations)
-	# tokenize (placeholder to set breakpoint below)
-	print(len(dataset))
+		conversation_observations = run_selfplay_game(data[i]['action_log'], game_index=i)
+		dataset_examples.extend(conversation_observations)
+
+	if not dataset_examples:
+		raise ValueError("No dataset examples were generated from the provided games.")
+
+	print(f"Collected {len(dataset_examples)} training turns. Building Hugging Face dataset...")
+
+	hf_dataset = Dataset.from_list(dataset_examples)
+
+	output_dir = Path(__file__).parent.parent / "data" / "sft_datasets"
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	dataset_path = output_dir / game_desc
+	hf_dataset.save_to_disk(str(dataset_path))
+
+	print(f"Saved dataset with {len(hf_dataset)} examples to {dataset_path}")
+	return hf_dataset
 	  
 if __name__ == "__main__":
-	get_matching_human_human_sft_data(10)
+	get_matching_human_human_sft_data()

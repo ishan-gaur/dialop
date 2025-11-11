@@ -21,6 +21,11 @@ dependencies = [
     "flask>=2.2.2",
     "ruamel-yaml>=0.17.21",
     "torch>=2.8.0",
+    "wandb>=0.22.3",
+    "huggingface-hub>=0.36.0",
+    "transformers>=4.57.1",
+    "datasets>=4.4.1",
+    "peft>=0.17.1",
 ]
 
 [project.optional-dependencies]

@@ -172,3 +172,4 @@ dialop/data/
 dialop/.api_key
 data/
 *.jsonl
+wandb/
