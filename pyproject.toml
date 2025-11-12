@@ -26,6 +26,8 @@ dependencies = [
     "transformers>=4.57.1",
     "datasets>=4.4.1",
     "peft>=0.17.1",
+    "ninja>=1.13.0",
+    "unsloth>=2024.8",
 ]
 
 [project.optional-dependencies]

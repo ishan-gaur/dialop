@@ -2,7 +2,7 @@ from enum import Enum
 from pathlib import Path
 import json
 
-DATA_FOLDER = Path("/home/ishangaur/dialop/data/")
+DATA_FOLDER = Path("/home/ishan/dialop/data/")
 
 class GameType(Enum):
     MATCHING = "optimization"

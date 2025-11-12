@@ -11,13 +11,14 @@ import torch
 import wandb
 from datasets import Dataset, load_from_disk
 from fire import Fire
-from peft import LoraConfig, get_peft_model
+from unsloth import FastLanguageModel
+# from peft import LoraConfig, get_peft_model
 from torch.nn.utils import clip_grad_norm_
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
+    # AutoModelForCausalLM,
+    # AutoTokenizer,
     get_cosine_schedule_with_warmup,
 )
 
@@ -38,7 +39,8 @@ def set_seed(seed: int) -> None:
 
 def prepare_dataset(
     dataset: Dataset,
-    tokenizer: AutoTokenizer,
+    # tokenizer: AutoTokenizer,
+    tokenizer,
     max_seq_length: int,
 ) -> Dataset:
     def extract_chat_components(messages: List[Dict[str, str]]) -> Tuple[str, str, str]:
@@ -64,6 +66,7 @@ def prepare_dataset(
         user_list: List[str] = []
         assistant_list: List[str] = []
         prompt_messages_list: List[List[Dict[str, str]]] = []
+        full_sequence_lengths: List[int] = []
 
         for messages in batch["messages"]:
             system_msg, user_msg, assistant_msg = extract_chat_components(messages)
@@ -106,6 +109,7 @@ def prepare_dataset(
             user_list.append(user_msg)
             assistant_list.append(assistant_msg)
             prompt_messages_list.append(prompt_messages)
+            full_sequence_lengths.append(len(tokenizer.tokenize(full_text)))
 
         return {
             "input_ids": input_ids_list,
@@ -115,12 +119,14 @@ def prepare_dataset(
             "user": user_list,
             "assistant": assistant_list,
             "prompt_messages": prompt_messages_list,
+            "full_sequence_length": full_sequence_lengths,
         }
 
     return dataset.map(
         _map_fn,
         batched=True,
         remove_columns=[col for col in dataset.column_names if col not in {"messages"}],
+        load_from_cache_file=False,
     )
 
 
@@ -155,7 +161,8 @@ def compute_param_norm(parameters: List[torch.nn.Parameter]) -> float:
 
 
 def evaluate(
-    model: AutoModelForCausalLM,
+    # model: AutoModelForCausalLM,
+    model: FastLanguageModel,
     dataloader: DataLoader,
     device: torch.device,
 ) -> Tuple[float, float]:
@@ -187,8 +194,9 @@ def evaluate(
 
 
 def qualitative_sampling(
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
+    model: FastLanguageModel,
+    # tokenizer: AutoTokenizer,
+    tokenizer,
     val_samples: List[Dict],
     device: torch.device,
     args,
@@ -254,7 +262,7 @@ class TrainConfig:
         warmup_ratio: float = 0.03,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
-        max_seq_length: int = 4096,
+        max_seq_length: int = 100000,
         lora_r: int = 64,
         lora_alpha: int = 128,
         lora_dropout: float = 0.05,
@@ -291,17 +299,55 @@ class TrainConfig:
 
 def main(**kwargs) -> None:
     args = TrainConfig(**kwargs)
-
     os.makedirs(args.output_dir, exist_ok=True)
-
     set_seed(args.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        use_fast=True,
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    max_seq_length = 2048 # Choose any! We auto support RoPE Scaling internally!
+    dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
+    load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
+
+    # 4bit pre quantized models we support for 4x faster downloading + no OOMs.
+    fourbit_models = [
+        "unsloth/Meta-Llama-3.1-8B-bnb-4bit",      # Llama-3.1 15 trillion tokens model 2x faster!
+        "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit",
+        "unsloth/Meta-Llama-3.1-70B-bnb-4bit",
+        "unsloth/Meta-Llama-3.1-405B-bnb-4bit",    # We also uploaded 4bit for 405b!
+        "unsloth/Mistral-Nemo-Base-2407-bnb-4bit", # New Mistral 12b 2x faster!
+        "unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit",
+        "unsloth/mistral-7b-v0.3-bnb-4bit",        # Mistral v3 2x faster!
+        "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
+        "unsloth/Phi-3.5-mini-instruct",           # Phi-3.5 2x faster!
+        "unsloth/Phi-3-medium-4k-instruct",
+        "unsloth/gemma-2-9b-bnb-4bit",
+        "unsloth/gemma-2-27b-bnb-4bit",            # Gemma 2x faster!
+    ] # More models at https://huggingface.co/unsloth
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name = "unsloth/Meta-Llama-3.1-8B",
+        max_seq_length = max_seq_length,
+        dtype = dtype,
+        load_in_4bit = load_in_4bit,
+        # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
     )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r = 16, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj",],
+        lora_alpha = 16,
+        lora_dropout = 0, # Supports any, but = 0 is optimized
+        bias = "none",    # Supports any, but = "none" is optimized
+        # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
+        use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+        random_state = 3407,
+        use_rslora = False,  # We support rank stabilized LoRA
+        loftq_config = None, # And LoftQ
+    )
+    if device.type == "cuda":
+        model = model.to(device)
 
     raw_dataset = load_from_disk(args.dataset_path)
     split_dataset = raw_dataset.train_test_split(
@@ -332,36 +378,6 @@ def main(**kwargs) -> None:
         shuffle=False,
         collate_fn=lambda batch: collate_fn(batch, tokenizer.pad_token_id),
     )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = AutoModelForCausalLM.from_pretrained(
-        "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        device_map=None,
-    )
-
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-    )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
-
-    if device.type == "cuda":
-        model = model.to(device)
 
     total_trainable_params = [p for p in model.parameters() if p.requires_grad]
 
