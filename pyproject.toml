@@ -1,61 +1,22 @@
 [project]
 name = "dialop"
 version = "0.1.0"
-description = "The DialOp environments for collaborative dialogue."
+description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9,<4.0"
-authors = [
-    { name = "Jessy Lin", email = "jessy81697@gmail.com" },
-]
+requires-python = ">=3.12"
 dependencies = [
-    "numpy",
-    "scipy",
-    "pyparsing",
-    "python-dateutil",
-    "rich",
-    "tiktoken",
-    "tyro",
-    "thefuzz",
-    "openai",
+    "datasets>=4.3.0",
     "fire>=0.7.1",
-    "flask>=2.2.2",
-    "ruamel-yaml>=0.17.21",
+    "flask>=3.1.2",
+    "openai>=2.7.2",
+    "rich>=14.2.0",
+    "ruamel-yaml>=0.18.16",
+    "scipy>=1.16.3",
     "torch>=2.8.0",
-    "wandb>=0.22.3",
-    "huggingface-hub>=0.36.0",
-    "transformers>=4.57.1",
-    "datasets>=4.4.1",
-    "peft>=0.17.1",
-    "ninja>=1.13.0",
-    "unsloth>=2024.8",
-]
-
-[project.optional-dependencies]
-apps = [
-    "Flask==2.2.2",
-    "Flask-SocketIO==5.3.2",
-    "Jinja2==3.1.2",
-    "ruamel.yaml==0.17.21",
-    "Werkzeug==2.2.2",
-    "boto3==1.26.69",
-]
-
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-include = ["dialop*"]
-
-[tool.uv.workspace]
-members = [
-    ".",
-]
-
-[tool.uv.sources]
-dialop = { workspace = true }
-
-[dependency-groups]
-dev = [
-    "dialop",
+    "tqdm>=4.67.1",
+    "tyro>=0.9.35",
+    "unsloth>=2025.11.2",
+    "unsloth-zoo>=2025.11.3",
+    "wandb>=0.23.0",
+    "weave>=0.52.16",
 ]

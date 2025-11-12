@@ -1,26 +1,25 @@
-import math
+import unsloth
+# import weave
+
 import os
+import math
 import random
-from contextlib import nullcontext
-from dataclasses import dataclass
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-import numpy as np
-import torch
 import wandb
-from datasets import Dataset, load_from_disk
 from fire import Fire
-from unsloth import FastLanguageModel
-# from peft import LoraConfig, get_peft_model
-from torch.nn.utils import clip_grad_norm_
+
+import torch
+import numpy as np
+from datasets import Dataset, load_from_disk
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from transformers import (
-    # AutoModelForCausalLM,
-    # AutoTokenizer,
-    get_cosine_schedule_with_warmup,
-)
+
+from trl import SFTTrainer
+from unsloth import FastLanguageModel
+from transformers import TrainingArguments
 
 
 @dataclass
@@ -128,6 +127,11 @@ def prepare_dataset(
         remove_columns=[col for col in dataset.column_names if col not in {"messages"}],
         load_from_cache_file=False,
     )
+    # return dataset.map(
+    #     lambda batch: batch,
+    #     batched=True,
+    #     remove_columns=[col for col in dataset.column_names if col not in {"messages"}],
+    # )
 
 
 def collate_fn(batch: List[Dict[str, torch.Tensor]], pad_token_id: int) -> Batch:
@@ -161,7 +165,6 @@ def compute_param_norm(parameters: List[torch.nn.Parameter]) -> float:
 
 
 def evaluate(
-    # model: AutoModelForCausalLM,
     model: FastLanguageModel,
     dataloader: DataLoader,
     device: torch.device,
@@ -174,7 +177,6 @@ def evaluate(
             input_ids = batch.input_ids.to(device)
             attention_mask = batch.attention_mask.to(device)
             labels = batch.labels.to(device)
-
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -195,7 +197,6 @@ def evaluate(
 
 def qualitative_sampling(
     model: FastLanguageModel,
-    # tokenizer: AutoTokenizer,
     tokenizer,
     val_samples: List[Dict],
     device: torch.device,
@@ -258,8 +259,8 @@ class TrainConfig:
         train_batch_size: int = 1,
         eval_batch_size: int = 1,
         learning_rate: float = 2e-4,
-        weight_decay: float = 0.0,
-        warmup_ratio: float = 0.03,
+        weight_decay: float = 0.01,
+        warmup_steps: int = 5,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
         max_seq_length: int = 100000,
@@ -270,8 +271,8 @@ class TrainConfig:
         temperature: float = 0.7,
         top_p: float = 0.9,
         project: str = "assistance_sft_matching",
-        entity: str = None,
         log_every: int = 10,
+        n_generation_samples: int = 10,
     ) -> None:
         self.dataset_path = dataset_path
         self.output_dir = output_dir
@@ -282,7 +283,7 @@ class TrainConfig:
         self.eval_batch_size = eval_batch_size
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
-        self.warmup_ratio = warmup_ratio
+        self.warmup_steps = warmup_steps
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
         self.max_seq_length = max_seq_length
@@ -293,8 +294,8 @@ class TrainConfig:
         self.temperature = temperature
         self.top_p = top_p
         self.project = project
-        self.entity = entity
         self.log_every = log_every
+        self.n_generation_samples = n_generation_samples
 
 
 def main(**kwargs) -> None:
@@ -305,7 +306,7 @@ def main(**kwargs) -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    max_seq_length = 2048 # Choose any! We auto support RoPE Scaling internally!
+    max_seq_length = 4096 # Choose any! We auto support RoPE Scaling internally!
     dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+
     load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
 
@@ -326,7 +327,7 @@ def main(**kwargs) -> None:
     ] # More models at https://huggingface.co/unsloth
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name = "unsloth/Meta-Llama-3.1-8B",
+        model_name = "unsloth/Meta-Llama-3.1-8B-Instruct",
         max_seq_length = max_seq_length,
         dtype = dtype,
         load_in_4bit = load_in_4bit,
@@ -346,8 +347,8 @@ def main(**kwargs) -> None:
         use_rslora = False,  # We support rank stabilized LoRA
         loftq_config = None, # And LoftQ
     )
-    if device.type == "cuda":
-        model = model.to(device)
+    # if device.type == "cuda":
+    #     model = model.to(device)
 
     raw_dataset = load_from_disk(args.dataset_path)
     split_dataset = raw_dataset.train_test_split(
@@ -358,62 +359,30 @@ def main(**kwargs) -> None:
     train_dataset = split_dataset["train"]
     val_dataset = split_dataset["test"]
 
+    # just removes columns other than messages
     train_dataset = prepare_dataset(train_dataset, tokenizer, args.max_seq_length)
     val_dataset = prepare_dataset(val_dataset, tokenizer, args.max_seq_length)
 
-    val_samples_for_generation = [val_dataset[i] for i in range(len(val_dataset))]
-
-    train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-    val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=args.train_batch_size,
-        shuffle=True,
-        collate_fn=lambda batch: collate_fn(batch, tokenizer.pad_token_id),
+    generation_sample_indices = np.random.choice(
+        len(val_dataset),
+        size=min(args.n_generation_samples, len(val_dataset)),
+        replace=False,
     )
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=args.eval_batch_size,
-        shuffle=False,
-        collate_fn=lambda batch: collate_fn(batch, tokenizer.pad_token_id),
-    )
-
+    val_samples_for_generation = [val_dataset[i] for i in generation_sample_indices]
     total_trainable_params = [p for p in model.parameters() if p.requires_grad]
-
-    total_optimization_steps = (
-        math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-        * args.num_epochs
-    )
-    optimizer = torch.optim.AdamW(
-        total_trainable_params,
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=int(args.warmup_ratio * total_optimization_steps),
-        num_training_steps=total_optimization_steps,
-    )
-
-    if device.type == "cuda":
-        scaler = torch.amp.GradScaler(device="cuda")
-    else:
-        scaler = torch.amp.GradScaler(device="cpu", enabled=False)
 
     wandb.init(
         project=args.project,
-        entity=args.entity,
         config={
             "val_ratio": args.val_ratio,
             "seed": args.seed,
             "num_epochs": args.num_epochs,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
-            "warmup_ratio": args.warmup_ratio,
+            "warmup_steps": args.warmup_steps,
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "train_batch_size": args.train_batch_size,
-            "eval_batch_size": args.eval_batch_size,
+            # "eval_batch_size": args.eval_batch_size,
             "max_seq_length": args.max_seq_length,
             "lora_r": args.lora_r,
             "lora_alpha": args.lora_alpha,
@@ -421,87 +390,63 @@ def main(**kwargs) -> None:
         },
     )
 
-    global_step = 0
-    for epoch in range(1, args.num_epochs + 1):
-        model.train()
-        optimizer.zero_grad()
+    trainer = SFTTrainer(
+        model = model,
+        torch_compile = False,
+        processing_class = tokenizer, # think is will just load the 
+        train_dataset = train_dataset,
+        eval_dataset= val_dataset,
+        dataset_text_field = "text",
+        max_seq_length = max_seq_length,
+        dataset_num_proc = 2,
+        packing = False, # Can make training 5x faster for short sequences.
+        assistant_only_loss = True,
+        args = TrainingArguments(
+            per_device_train_batch_size = args.train_batch_size,
+            gradient_accumulation_steps = args.gradient_accumulation_steps,
+            warmup_steps = args.warmup_steps,
+            num_train_epochs = args.num_epochs, # Set this for 1 full training run.
+            learning_rate = args.learning_rate,
+            bf16 = True,
+            logging_steps = 1,
+            optim = "adamw_8bit",
+            weight_decay = args.weight_decay,
+            lr_scheduler_type = "linear",
+            seed = args.seed,
+            output_dir = "outputs",
+            report_to = "wandb",
+        ),
+    )
+    
+    ### PERF STATS ###
+    gpu_stats = torch.cuda.get_device_properties(0)
+    start_gpu_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
+    max_memory = round(gpu_stats.total_memory / 1024 / 1024 / 1024, 3)
+    print(f"GPU = {gpu_stats.name}. Max memory = {max_memory} GB.")
+    print(f"{start_gpu_memory} GB of memory reserved.")
+    ##################
 
-        for step, batch in enumerate(train_dataloader, start=1):
-            input_ids = batch.input_ids.to(device)
-            attention_mask = batch.attention_mask.to(device)
-            labels = batch.labels.to(device)
+    trainer_stats = trainer.train()
+    print(trainer_stats)
 
-            autocast_ctx = (
-                torch.amp.autocast(device_type="cuda")
-                if device.type == "cuda"
-                else nullcontext()
-            )
-            with autocast_ctx:
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                )
-                loss = outputs.loss / args.gradient_accumulation_steps
-
-            scaler.scale(loss).backward()
-
-            if step % args.gradient_accumulation_steps == 0:
-                if device.type == "cuda":
-                    scaler.unscale_(optimizer)
-
-                grad_norm = clip_grad_norm_(
-                    total_trainable_params,
-                    args.max_grad_norm,
-                )
-                param_norm = compute_param_norm(total_trainable_params)
-
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                optimizer.zero_grad()
-                global_step += 1
-
-                loss_value = outputs.loss.detach().item()
-                train_perplexity = math.exp(min(loss_value, 100))
-
-                if global_step % args.log_every == 0:
-                    wandb.log(
-                        {
-                            "train/loss": loss_value,
-                            "train/perplexity": train_perplexity,
-                            "train/grad_norm": grad_norm.item()
-                            if isinstance(grad_norm, torch.Tensor)
-                            else float(grad_norm),
-                            "train/param_norm": param_norm,
-                            "train/learning_rate": scheduler.get_last_lr()[0],
-                            "train/step": global_step,
-                            "epoch": epoch,
-                        }
-                    )
-
-        eval_loss, eval_ppl = evaluate(model, val_dataloader, device)
-        wandb.log(
-            {
-                "eval/loss": eval_loss,
-                "eval/perplexity": eval_ppl,
-                "epoch": epoch,
-            }
-        )
-
-        qualitative_sampling(
-            model,
-            tokenizer,
-            val_samples_for_generation,
-            device,
-            args,
-            epoch,
-        )
-
-        output_path = os.path.join(args.output_dir, f"epoch_{epoch}")
-        os.makedirs(output_path, exist_ok=True)
-        model.save_pretrained(output_path)
-        tokenizer.save_pretrained(output_path)
+    ### PERF STATS ###
+    used_memory = round(torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024, 3)
+    used_memory_for_lora = round(used_memory - start_gpu_memory, 3)
+    used_percentage = round(used_memory / max_memory * 100, 3)
+    lora_percentage = round(used_memory_for_lora / max_memory * 100, 3)
+    print(f"{trainer_stats.metrics['train_runtime']} seconds used for training.")
+    print(
+        f"{round(trainer_stats.metrics['train_runtime']/60, 2)} minutes used for training."
+    )
+    print(f"Peak reserved memory = {used_memory} GB.")
+    print(f"Peak reserved memory for training = {used_memory_for_lora} GB.")
+    print(f"Peak reserved memory % of max memory = {used_percentage} %.")
+    print(f"Peak reserved memory for training % of max memory = {lora_percentage} %.")
+    ##################
+    
+    output_path = Path(args.output_dir) / wandb.run.id
+    model.save_pretrained(output_path)
+    tokenizer.save_pretrained(output_path)
 
     wandb.finish()
 

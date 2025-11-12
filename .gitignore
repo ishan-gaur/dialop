@@ -173,3 +173,6 @@ dialop/.api_key
 data/
 *.jsonl
 wandb/
+
+unsloth_compiled_cache/
+dialop/checkpoints/
