@@ -254,7 +254,7 @@ class TrainConfig:
             Path(__file__).parent.parent / "data" / "sft_datasets" / "optimization_human-human"
         ),
         output_dir: str = str(Path(__file__).parent.parent / "checkpoints" / "lora"),
-        val_ratio: float = 0.3,
+        val_ratio: float = 0.1,
         seed: int = 42,
         num_epochs: int = 10,
         train_batch_size: int = 1,

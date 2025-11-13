@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 from trl import SFTTrainer
 from unsloth import FastLanguageModel
+from unsloth import is_bfloat16_supported
 from transformers import TrainingArguments
 
 
@@ -138,22 +139,40 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]], pad_token_id: int) -> Batch
     def _to_long(t):
         return t if isinstance(t, torch.Tensor) else torch.tensor(t, dtype=torch.long)
 
+    if any("attention_mask" not in example for example in batch):
+        missing = sum("attention_mask" not in example for example in batch)
+        raise KeyError(
+            f"attention_mask missing from {missing} batch items; set remove_unused_columns=False in TrainingArguments."
+        )
+
     input_ids = pad_sequence(
-        [_to_long(item["input_ids"]) for item in batch],
+        [_to_long(example["input_ids"]) for example in batch],
         batch_first=True,
         padding_value=pad_token_id,
     )
     attention_mask = pad_sequence(
-        [_to_long(item["attention_mask"]) for item in batch],
+        [_to_long(example["attention_mask"]) for example in batch],
         batch_first=True,
         padding_value=0,
     )
     labels = pad_sequence(
-        [_to_long(item["labels"]) for item in batch],
+        [_to_long(example["labels"]) for example in batch],
         batch_first=True,
         padding_value=-100,
     )
     return Batch(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+
+
+def build_trl_collator(pad_token_id: int):
+    def _collate(features: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        batch = collate_fn(features, pad_token_id)
+        return {
+            "input_ids": batch.input_ids,
+            "attention_mask": batch.attention_mask,
+            "labels": batch.labels,
+        }
+
+    return _collate
 
 
 def compute_param_norm(parameters: List[torch.nn.Parameter]) -> float:
@@ -256,14 +275,14 @@ class TrainConfig:
         val_ratio: float = 0.3,
         seed: int = 42,
         num_epochs: int = 10,
-        train_batch_size: int = 1,
+        train_batch_size: int = 4,
         eval_batch_size: int = 1,
         learning_rate: float = 2e-4,
         weight_decay: float = 0.01,
         warmup_steps: int = 5,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
-        max_seq_length: int = 100000,
+        max_seq_length: int = 4096,
         lora_r: int = 64,
         lora_alpha: int = 128,
         lora_dropout: float = 0.05,
@@ -343,12 +362,16 @@ def main(**kwargs) -> None:
         bias = "none",    # Supports any, but = "none" is optimized
         # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
         use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+        # use_gradient_checkpointing = False, # True or "unsloth" for very long context
         random_state = 3407,
         use_rslora = False,  # We support rank stabilized LoRA
         loftq_config = None, # And LoftQ
     )
     # if device.type == "cuda":
     #     model = model.to(device)
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     raw_dataset = load_from_disk(args.dataset_path)
     split_dataset = raw_dataset.train_test_split(
@@ -362,6 +385,10 @@ def main(**kwargs) -> None:
     # just removes columns other than messages
     train_dataset = prepare_dataset(train_dataset, tokenizer, args.max_seq_length)
     val_dataset = prepare_dataset(val_dataset, tokenizer, args.max_seq_length)
+
+    tensor_columns = ["input_ids", "attention_mask", "labels"]
+    train_dataset.set_format(type="torch", columns=tensor_columns, output_all_columns=True)
+    val_dataset.set_format(type="torch", columns=tensor_columns, output_all_columns=True)
 
     generation_sample_indices = np.random.choice(
         len(val_dataset),
@@ -390,31 +417,34 @@ def main(**kwargs) -> None:
         },
     )
 
+    data_collator = build_trl_collator(tokenizer.pad_token_id)
+
     trainer = SFTTrainer(
         model = model,
-        torch_compile = False,
-        processing_class = tokenizer, # think is will just load the 
+        tokenizer = tokenizer,
         train_dataset = train_dataset,
-        eval_dataset= val_dataset,
-        dataset_text_field = "text",
+        eval_dataset = val_dataset,
+        dataset_text_field = None,
         max_seq_length = max_seq_length,
-        dataset_num_proc = 2,
         packing = False, # Can make training 5x faster for short sequences.
         assistant_only_loss = True,
+        data_collator = data_collator,
         args = TrainingArguments(
             per_device_train_batch_size = args.train_batch_size,
             gradient_accumulation_steps = args.gradient_accumulation_steps,
             warmup_steps = args.warmup_steps,
             num_train_epochs = args.num_epochs, # Set this for 1 full training run.
             learning_rate = args.learning_rate,
-            bf16 = True,
-            logging_steps = 1,
+            fp16 = not is_bfloat16_supported(),
+            bf16 = is_bfloat16_supported(),
+            logging_steps = args.log_every,
             optim = "adamw_8bit",
             weight_decay = args.weight_decay,
             lr_scheduler_type = "linear",
             seed = args.seed,
             output_dir = "outputs",
             report_to = "wandb",
+            remove_unused_columns = False,
         ),
     )
     
